@@ -1,3 +1,6 @@
+src/px4_msgs/
+
+
 # Prerequisites
 *.d
 
@@ -44,6 +47,8 @@ build/
 Build/
 build-*/
 
+install/
+log/
 # CMake generated files
 CMakeFiles/
 CMakeCache.txt
