@@ -11,6 +11,11 @@ find_package(rclcpp REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
+add_executable(heartbeat_node src/heartbeat_node.cpp)
+ament_target_dependencies(heartbeat_node rclcpp px4_msgs std_msgs)
+
+
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
@@ -23,4 +28,9 @@ if(BUILD_TESTING)
   ament_lint_auto_find_test_dependencies()
 endif()
 
+install(TARGETS
+	heartbeat_node
+	DESTINATION lib/${PROJECT_NAME})
+
 ament_package()
+

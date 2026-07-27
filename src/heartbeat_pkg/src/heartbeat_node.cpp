@@ -13,7 +13,7 @@ public:
        auto qos = rclcpp::SensorDataQoS();
 
         subscription_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>(
-            "/fmu/out/vehicle_local_position",
+            "/fmu/out/vehicle_local_position_v1",
             qos,
             std::bind(&HeartbeatNode::position_callback, this, std::placeholders::_1)
          );
