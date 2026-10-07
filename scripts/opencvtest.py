@@ -30,9 +30,9 @@ class CameraSubscriber(Node):
         if self.done:
             return
         
-        cv_img = self.bridge.imgmsg_to_cv(msg, desired_encoding='bgr8')
+        cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         cv2.imwrite('frame.png', cv_img)
-        self.get_logger().info(f"Saved frame with shape: {csv_image.shape}")
+        self.get_logger().info(f"Saved frame with shape: {cv_img.shape}")
         self.done =True
             
 
