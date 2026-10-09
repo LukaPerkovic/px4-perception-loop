@@ -19,6 +19,7 @@ find_library(ORT_LIB NAMES onnxruntime PATHS ${ORT_ROOT}/lib)
 
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(vision_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
@@ -29,7 +30,7 @@ include_directories(
 
 
 add_executable(perception_node src/perception_node.cpp)
-ament_target_dependencies(perception_node rclcpp sensor_msgs cv_bridge)
+ament_target_dependencies(perception_node rclcpp sensor_msgs vision_msgs cv_bridge)
 
 target_include_directories(perception_node PRIVATE ${ORT_ROOT}/include)
 target_link_libraries(perception_node ${ORT_LIB} ${OpenCV_LIBS})

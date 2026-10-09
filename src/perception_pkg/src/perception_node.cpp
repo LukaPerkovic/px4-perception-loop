@@ -14,19 +14,12 @@ public:
     PerceptionNode()
      : Node("perception_node"), env_(), session_()
     {
-
-
-        sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            "/rgb/image_raw",
-            rclcpp::SensorDataQoS(),
-            std::bind(&PerceptionNode::callback, this, std::placeholders::_1)
-        );
-
+        
         RCLCPP_INFO(
             this->get_logger(),
             "perception_node up"
         );
-
+        
         this->declare_parameter<std::string>(
             "model_path",
             "/home/lu/yolo_env/yolo26n.onnx"
@@ -42,20 +35,37 @@ public:
         
         std::vector<int64_t> shape;
         shape = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-
+        
         for (int64_t d : shape)
         {
-            RCLCPP_INFO(this->get_logger(), "shape: %u", d);
+            RCLCPP_INFO(this->get_logger(), "vector elem shape: %ld", d);
         }
-
+        
         Ort::AllocatorWithDefaultOptions allocator;
+        auto in_name = session_->GetInputNameAllocated(0, allocator);
+        auto out_name = session_->GetOutputNameAllocated(0, allocator);
 
-        auto in_count = session_->GetInputCount(0, allocator);
-        RCLCPP_INFO(this->get_logger(), "input: %s", in_count.get());
+        RCLCPP_INFO(
+            this->get_logger(),
+            "input name: %s, output_name: %s ;",
+             in_name.get(), out_name.get()
+            );
+        
+        int64_t in_count = session_->GetInputCount();
+        int64_t out_count = session_->GetOutputCount();
 
 
-        auto out_count = session_->GetOutputCount(0, allocator);
-        RCLCPP_INFO(this->get_logger(), "output: %s", out_count.get());
+        RCLCPP_INFO(
+            this->get_logger(),
+            "input count: %zu, output count: %zu",
+            in_count, out_count
+        );
+        
+        sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+            "/rgb/image_raw",
+            rclcpp::SensorDataQoS(),
+            std::bind(&PerceptionNode::callback, this, std::placeholders::_1)
+        );
     }
 
 private:
@@ -80,18 +90,16 @@ private:
             this->get_logger(),
             *this->get_clock(),
             1000,
-            "Rows: %u, Cols: %u, Channels: %u",
+            "Rows: %d, Cols: %d, Channels: %d",
             frame.rows, frame.cols, frame.channels()
         );
 
     }
-
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // + ownership
-
-
+    
     Ort::Env env_;
     std::unique_ptr<Ort::Session> session_;
-
+    
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // + ownership
 };
 
 
