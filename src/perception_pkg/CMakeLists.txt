@@ -17,21 +17,24 @@ find_package(ament_cmake REQUIRED)
 
 find_library(ORT_LIB NAMES onnxruntime PATHS ${ORT_ROOT}/lib)
 
-find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(px4_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
 
 include_directories(
-  include,
+  include
   ${OpenCV_INCLUDE_DIRS}
 )
 
-add_executable(perception_node src/perception_node.cpp)
-ament_target_dependencies(perception_node rclcpp px4_msgs sensor_msgs cv_bridge)
 
+add_executable(perception_node src/perception_node.cpp)
+ament_target_dependencies(perception_node rclcpp sensor_msgs cv_bridge)
+
+target_include_directories(perception_node PRIVATE ${ORT_ROOT}/include)
+target_link_libraries(perception_node ${ORT_LIB} ${OpenCV_LIBS})
+
+set_target_properties(perception_node PROPERTIES INSTALL_RPATH "${ORT_ROOT}/lib")
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -44,5 +47,9 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+install(TARGETS
+	perception_node
+	DESTINATION lib/${PROJECT_NAME})
 
 ament_package()

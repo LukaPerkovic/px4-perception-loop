@@ -5,15 +5,16 @@
   <version>0.0.0</version>
   <description>TODO: Package description</description>
   <maintainer email="kul.ruka.luka@gmail.com">lu</maintainer>
-  <license>TODO: License declaration</license>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>cv_bridge</depend>
   <depend>rclcpp</depend>
-  <depend>OpenCV</depend>
-  <depend>px4_msgs</depend>
+  <depend>libopencv-dev</depend>
   <depend>sensor_msgs</depend>
+  <depend>vision_msgs</depend>
+
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
