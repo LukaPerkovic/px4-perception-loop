@@ -1,3 +1,5 @@
+#include <chrono>
+
 #include <rclcpp/rclcpp.hpp>
 
 #include <cv_bridge/cv_bridge.h>
@@ -25,41 +27,106 @@ public:
             "/home/lu/yolo_env/yolo26n.onnx"
         );
 
-        std::string model_path =this->get_parameter("model_path").as_string();
-
-
+        try
+        {
+        std::string model_path = this->get_parameter("model_path").as_string();
         Ort::SessionOptions opts;
         opts.SetIntraOpNumThreads(1);
         session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), opts);
-
-        
-        std::vector<int64_t> shape;
-        shape = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-        
-        for (int64_t d : shape)
-        {
-            RCLCPP_INFO(this->get_logger(), "vector elem shape: %ld", d);
         }
-        
-        Ort::AllocatorWithDefaultOptions allocator;
-        auto in_name = session_->GetInputNameAllocated(0, allocator);
-        auto out_name = session_->GetOutputNameAllocated(0, allocator);
-
-        RCLCPP_INFO(
-            this->get_logger(),
-            "input name: %s, output_name: %s ;",
-             in_name.get(), out_name.get()
+        catch (const Ort::Exception& e)
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "Error while finding model path: %s", e.what()
             );
-        
-        int64_t in_count = session_->GetInputCount();
-        int64_t out_count = session_->GetOutputCount();
+        }
 
+        std::vector<float> input_data(1228800, 0.0f);
+        std::vector<int64_t> input_shape = {1, 3, 640, 640};
+
+
+
+        auto mem = Ort::MemoryInfo::CreateCpu(
+            Ort::Allocator,
+            OrtMemType::OrtMemTypeCPU
+        );
+
+        Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
+            mem,
+            input_data.data(), input_data.size(),
+            input_shape.data(), input_shape.size()
+        );
+
+        const char* in_names[] = {"images"};
+        const char* out_names[] = {"output0"};
+
+        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+
+        auto outputs = session_->Run(
+            Ort::RunOptions{nullptr},
+            in_names, &in_tensor, 1,
+            out_names, 1
+        );
+
+        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
+        duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
+        
+        
+        auto type_info = outputs.front().GetTensorTypeAndShapeInfo();
 
         RCLCPP_INFO(
             this->get_logger(),
-            "input count: %zu, output count: %zu",
-            in_count, out_count
+            "Outputs size: %zu,\nOutputs shape: %ld\nElement count: %zu, Processing time: %d",
+            outputs.size(), outputs[0].shape, type_info.GetElementCount(), time_span.count()
         );
+
+
+        
+
+        
+        // std::vector<int64_t> input_shape;
+        // std::vector<int64_t> output_shape;
+        // input_shape = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        // output_shape = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+
+        
+        // for (int64_t d : input_shape)
+        // {
+        //     RCLCPP_INFO(this->get_logger(), "input vector elem shape: %ld", d);
+        // }
+
+        // for (int64_t d : output_shape)
+        // {
+        //     RCLCPP_INFO(this->get_logger(), "output vector elem shape: %ld", d);
+        // }
+        
+
+        
+        // Ort::AllocatorWithDefaultOptions allocator;
+        // auto in_name = session_->GetInputNameAllocated(0, allocator);
+        // auto out_name = session_->GetOutputNameAllocated(0, allocator);
+
+        // RCLCPP_INFO(
+        //     this->get_logger(),
+        //     "input name: %s, output_name: %s ;",
+        //      in_name.get(), out_name.get()
+        //     );
+        
+        // size_t in_count = session_->GetInputCount();
+        // size_t out_count = session_->GetOutputCount();
+
+
+        // RCLCPP_INFO(
+        //     this->get_logger(),
+        //     "input count: %zu, output count: %zu",
+        //     in_count, out_count
+        // );
+
+        
+
+
+
         
         sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/rgb/image_raw",
