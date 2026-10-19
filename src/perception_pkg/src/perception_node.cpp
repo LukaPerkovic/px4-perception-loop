@@ -5,6 +5,7 @@
 #include <cv_bridge/cv_bridge.h>
 #include <sensor_msgs/msg/image.hpp>
 #include <opencv2/opencv.hpp>
+#include <opencv2/dnn.hpp>
 
 #include <onnxruntime_cxx_api.h>
 
@@ -31,7 +32,7 @@ public:
         {
         std::string model_path = this->get_parameter("model_path").as_string();
         Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(1);
+        opts.SetIntraOpNumThreads(0);
         session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), opts);
         }
         catch (const Ort::Exception& e)
@@ -40,17 +41,19 @@ public:
                 this->get_logger(),
                 "Error while finding model path: %s", e.what()
             );
+
+            throw;
         }
+
+        mem = Ort::MemoryInfo::CreateCpu(
+            OrtAllocatorType::OrtDeviceAllocator,
+            OrtMemType::OrtMemTypeCPU
+        );
 
         std::vector<float> input_data(1228800, 0.0f);
         std::vector<int64_t> input_shape = {1, 3, 640, 640};
+        
 
-
-
-        auto mem = Ort::MemoryInfo::CreateCpu(
-            Ort::Allocator,
-            OrtMemType::OrtMemTypeCPU
-        );
 
         Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
             mem,
@@ -61,7 +64,7 @@ public:
         const char* in_names[] = {"images"};
         const char* out_names[] = {"output0"};
 
-        std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+        const auto t1 = std::chrono::steady_clock::now();
 
         auto outputs = session_->Run(
             Ort::RunOptions{nullptr},
@@ -69,16 +72,23 @@ public:
             out_names, 1
         );
 
-        std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
-        duration<double> time_span = duration_cast<duration<double>>(t2 - t1);
+        const auto t2 = std::chrono::steady_clock::now();
+        std::chrono::duration<double> time_span = std::chrono::duration_cast<
+            std::chrono::milliseconds
+        >(t2 - t1);
         
         
         auto type_info = outputs.front().GetTensorTypeAndShapeInfo();
+        std::string output_shape;
+        for (int64_t d : type_info.GetShape())
+        {
+            output_shape = output_shape + std::to_string(d) + " ";
+        }
 
         RCLCPP_INFO(
             this->get_logger(),
-            "Outputs size: %zu,\nOutputs shape: %ld\nElement count: %zu, Processing time: %d",
-            outputs.size(), outputs[0].shape, type_info.GetElementCount(), time_span.count()
+            "Outputs size: %zu | Outputs shape: %s | Element count: %zu | Processing time: %.4f",
+            outputs.size(), output_shape.c_str(), type_info.GetElementCount(), time_span.count()
         );
 
 
@@ -161,12 +171,51 @@ private:
             frame.rows, frame.cols, frame.channels()
         );
 
+        cv::Mat blob = cv::dnn::blobFromImage(
+            frame,
+            1.0/255.0,
+            cv::Size(640, 640),
+            cv::Scalar(),
+            true, // swapRB
+            false // crop
+        );
+
+
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            1000,
+            "blob.dims: %d,"
+            "blob.size[0]: %d, blob.size[1]: %d, blob.size[2]: %d, blob.size[3]: %d,"
+            "blob.total(): %zu,"
+            "blob.isContinuous(): %d",
+            blob.dims,
+            blob.size[0], blob.size[1], blob.size[2], blob.size[3],
+            blob.total(),
+            blob.isContinuous()
+        );
+                
+        std::vector<int64_t> shape = {1, 3, 640, 640};
+        Ort::Value in = Ort::Value::CreateTensor<float>(
+            mem, blob.ptr<float>(), blob.total(), shape.data(), shape.size());
+        
+        if (imgSave_ == false)
+        {
+            cv::imwrite("/tmp/frame.png", frame);
+            imgSave_ = true;
+        }
+
     }
     
     Ort::Env env_;
     std::unique_ptr<Ort::Session> session_;
+
+    Ort::MemoryInfo mem{nullptr};
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // + ownership
+
+    bool imgSave_ = false;
+
 };
 
 
