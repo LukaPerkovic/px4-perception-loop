@@ -49,94 +49,6 @@ public:
             OrtAllocatorType::OrtDeviceAllocator,
             OrtMemType::OrtMemTypeCPU
         );
-
-        std::vector<float> input_data(1228800, 0.0f);
-        std::vector<int64_t> input_shape = {1, 3, 640, 640};
-        
-
-
-        Ort::Value in_tensor = Ort::Value::CreateTensor<float>(
-            mem,
-            input_data.data(), input_data.size(),
-            input_shape.data(), input_shape.size()
-        );
-
-        const char* in_names[] = {"images"};
-        const char* out_names[] = {"output0"};
-
-        const auto t1 = std::chrono::steady_clock::now();
-
-        auto outputs = session_->Run(
-            Ort::RunOptions{nullptr},
-            in_names, &in_tensor, 1,
-            out_names, 1
-        );
-
-        const auto t2 = std::chrono::steady_clock::now();
-        std::chrono::duration<double> time_span = std::chrono::duration_cast<
-            std::chrono::milliseconds
-        >(t2 - t1);
-        
-        
-        auto type_info = outputs.front().GetTensorTypeAndShapeInfo();
-        std::string output_shape;
-        for (int64_t d : type_info.GetShape())
-        {
-            output_shape = output_shape + std::to_string(d) + " ";
-        }
-
-        RCLCPP_INFO(
-            this->get_logger(),
-            "Outputs size: %zu | Outputs shape: %s | Element count: %zu | Processing time: %.4f",
-            outputs.size(), output_shape.c_str(), type_info.GetElementCount(), time_span.count()
-        );
-
-
-        
-
-        
-        // std::vector<int64_t> input_shape;
-        // std::vector<int64_t> output_shape;
-        // input_shape = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-        // output_shape = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
-
-        
-        // for (int64_t d : input_shape)
-        // {
-        //     RCLCPP_INFO(this->get_logger(), "input vector elem shape: %ld", d);
-        // }
-
-        // for (int64_t d : output_shape)
-        // {
-        //     RCLCPP_INFO(this->get_logger(), "output vector elem shape: %ld", d);
-        // }
-        
-
-        
-        // Ort::AllocatorWithDefaultOptions allocator;
-        // auto in_name = session_->GetInputNameAllocated(0, allocator);
-        // auto out_name = session_->GetOutputNameAllocated(0, allocator);
-
-        // RCLCPP_INFO(
-        //     this->get_logger(),
-        //     "input name: %s, output_name: %s ;",
-        //      in_name.get(), out_name.get()
-        //     );
-        
-        // size_t in_count = session_->GetInputCount();
-        // size_t out_count = session_->GetOutputCount();
-
-
-        // RCLCPP_INFO(
-        //     this->get_logger(),
-        //     "input count: %zu, output count: %zu",
-        //     in_count, out_count
-        // );
-
-        
-
-
-
         
         sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/rgb/image_raw",
@@ -196,18 +108,55 @@ private:
         );
                 
         std::vector<int64_t> shape = {1, 3, 640, 640};
-        Ort::Value in = Ort::Value::CreateTensor<float>(
+        Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
             mem, blob.ptr<float>(), blob.total(), shape.data(), shape.size());
         
-        if (imgSave_ == false)
-        {
-            cv::imwrite("/tmp/frame.png", frame);
-            imgSave_ = true;
-        }
+
+        const char* in_names[] = {"images"};
+        const char* out_names[] = {"output0"};
+
+        auto outputs = session_->Run(
+            Ort::RunOptions{nullptr},
+            in_names, &input_tensor, 1,
+            out_names, 1
+        );
+
+        const float* ptr = outputs[0].GetTensorData<float>();
+        cv::Mat det(300, 6, CV_32F, (void*)ptr);
+
+        double maxv = 0.0;
+        cv::Point maxloc;
+        cv::minMaxLoc(det.col(4), nullptr, &ptr, nullptr, &ptr);
+
+        int n = cv::countNonZero(det.col(4) > 0.25);
+
+        const float* best = det.ptr<float>(maxloc.y);
+
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "max_conf=%.4f at row=%d n=%d | box=[%.1f %1.f %.1f %.1f] cls=%.1f",
+            best[4], maxloc.y, n
+            best[0], best[1], best[2], best[3], best[5]
+        );
+
+        RCLCPP_INFO_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            this->get_logger(),
+            "%s",
+            buf
+        );
+
+        // RCLCPP_INFO(
+        //     this->get_logger(),
+        //     "[OUTPUTS]Outputs size: %zu | Outputs shape: %s | Element count: %zu",
+        //     outputs.size(), output_shape.c_str(), type_info.GetElementCount()
+        // );
 
     }
     
     Ort::Env env_;
+
     std::unique_ptr<Ort::Session> session_;
 
     Ort::MemoryInfo mem{nullptr};
