@@ -44,7 +44,7 @@ vision_msgs::msg::Detection2DArray toDetections(
         d.bbox.size_y            = y_scale * (row[3] - row[1]);
 
         vision_msgs::msg::ObjectHypothesisWithPose h;
-        h.hypothesis.class_id    = std::to_string(row[5]);
+        h.hypothesis.class_id    = std::to_string(std::lround(row[5]));
         h.hypothesis.score       = row[4];
         d.results.push_back(h);
 
@@ -108,27 +108,12 @@ private:
 
     void callback(const sensor_msgs::msg::Image::SharedPtr msg)
     {
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            1000,
-            "Encoding %s | Width %u | Height %u",
-            msg->encoding.c_str(), msg->width, msg->height
-        );
         
         cv_bridge::CvImagePtr cv_ptr;
 
         cv_ptr = cv_bridge::toCvCopy(msg, "bgr8");
         
         cv::Mat frame = cv_ptr->image;
-
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            1000,
-            "Rows: %d, Cols: %d, Channels: %d",
-            frame.rows, frame.cols, frame.channels()
-        );
 
         cv::Mat blob = cv::dnn::blobFromImage(
             frame,
@@ -137,21 +122,6 @@ private:
             cv::Scalar(),
             true, // swapRB
             false // crop
-        );
-
-
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            1000,
-            "blob.dims: %d,"
-            "blob.size[0]: %d, blob.size[1]: %d, blob.size[2]: %d, blob.size[3]: %d,"
-            "blob.total(): %zu,"
-            "blob.isContinuous(): %d",
-            blob.dims,
-            blob.size[0], blob.size[1], blob.size[2], blob.size[3],
-            blob.total(),
-            blob.isContinuous()
         );
                 
         std::vector<int64_t> shape = {1, 3, 640, 640};
@@ -175,32 +145,13 @@ private:
         cv::Point maxloc;
         cv::minMaxLoc(det.col(4), nullptr, &maxv, nullptr, &maxloc);
 
-        int n = cv::countNonZero(det.col(4) > 0.25);
-
-        const float* best = det.ptr<float>(maxloc.y);
-
-        char buf[256];
-        snprintf(buf, sizeof(buf),
-            "max_conf=%.4f at row=%d n=%d | box=[%.1f %.1f %.1f %.1f] cls=%.1f",
-            best[4], maxloc.y, n,
-            best[0], best[1], best[2], best[3], best[5]
-        );
-
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            1000,
-            "%s",
-            buf
-        );
-
-        // RCLCPP_INFO(
-        //     this->get_logger(),
-        //     "[OUTPUTS]Outputs size: %zu | Outputs shape: %s | Element count: %zu",
-        //     outputs.size(), output_shape.c_str(), type_info.GetElementCount()
-        // );
-
+        auto det_msg = toDetections(det,
+            msg->header,
+            0.25f, msg->width, msg->height);
+        pub_->publish(det_msg);
+        
     }
+
     
     Ort::Env env_;
 
@@ -209,7 +160,7 @@ private:
     Ort::MemoryInfo mem{nullptr};
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // + ownership
-    rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr pub_;
+    rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr pub_;
 
 };
 
