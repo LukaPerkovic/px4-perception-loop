@@ -1,4 +1,5 @@
 #include <chrono>
+#include <string>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -8,6 +9,50 @@
 #include <opencv2/dnn.hpp>
 
 #include <onnxruntime_cxx_api.h>
+
+#include <vision_msgs/msg/detection2_d_array.hpp>
+
+
+vision_msgs::msg::Detection2DArray toDetections(
+    const cv::Mat& det,
+    const std_msgs::msg::Header& header,
+    float conf_thresh,
+    int src_w, int src_h)
+{
+    vision_msgs::msg::Detection2DArray out;
+    out.header = header;
+
+    const float model_w { 640.0f };
+    const float model_h { 640.0f }; 
+
+    const float x_scale = src_w / model_w;
+    const float y_scale = src_h / model_h;
+
+    for (int r = 0; r < det.rows; ++r)
+    {
+        const float* row = det.ptr<float>(r);
+
+        if (row[4] < conf_thresh) break;
+
+        vision_msgs::msg::Detection2D d;
+        d.header = header;
+
+        d.bbox.center.position.x = x_scale * (row[0] + row[2]) / 2;
+        d.bbox.center.position.y = y_scale * (row[1] + row[3]) / 2;
+        d.bbox.center.theta      = 0.0;
+        d.bbox.size_x            = x_scale * (row[2] - row[0]);
+        d.bbox.size_y            = y_scale * (row[3] - row[1]);
+
+        vision_msgs::msg::ObjectHypothesisWithPose h;
+        h.hypothesis.class_id    = std::to_string(row[5]);
+        h.hypothesis.score       = row[4];
+        d.results.push_back(h);
+
+        out.detections.push_back(d);
+    }
+
+    return out;
+}
 
 
 class PerceptionNode : public rclcpp::Node
@@ -55,6 +100,8 @@ public:
             rclcpp::SensorDataQoS(),
             std::bind(&PerceptionNode::callback, this, std::placeholders::_1)
         );
+
+        pub_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("/detections", 10);
     }
 
 private:
@@ -126,7 +173,7 @@ private:
 
         double maxv = 0.0;
         cv::Point maxloc;
-        cv::minMaxLoc(det.col(4), nullptr, &ptr, nullptr, &ptr);
+        cv::minMaxLoc(det.col(4), nullptr, &maxv, nullptr, &maxloc);
 
         int n = cv::countNonZero(det.col(4) > 0.25);
 
@@ -134,15 +181,15 @@ private:
 
         char buf[256];
         snprintf(buf, sizeof(buf),
-            "max_conf=%.4f at row=%d n=%d | box=[%.1f %1.f %.1f %.1f] cls=%.1f",
-            best[4], maxloc.y, n
+            "max_conf=%.4f at row=%d n=%d | box=[%.1f %.1f %.1f %.1f] cls=%.1f",
+            best[4], maxloc.y, n,
             best[0], best[1], best[2], best[3], best[5]
         );
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
-            this->get_logger(),
+            1000,
             "%s",
             buf
         );
@@ -162,8 +209,7 @@ private:
     Ort::MemoryInfo mem{nullptr};
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // + ownership
-
-    bool imgSave_ = false;
+    rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr pub_;
 
 };
 
