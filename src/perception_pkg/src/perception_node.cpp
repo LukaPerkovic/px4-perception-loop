@@ -1,4 +1,6 @@
-#include <chrono>
+#include <cmath>
+#include <functional>
+#include <memory>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -32,7 +34,7 @@ vision_msgs::msg::Detection2DArray toDetections(
     {
         const float* row = det.ptr<float>(r);
 
-        if (row[4] < conf_thresh) break;
+        if (row[4] < conf_thresh) break; // Output is sorted, 'break' exits early on purpose.
 
         vision_msgs::msg::Detection2D d;
         d.header = header;
@@ -63,22 +65,26 @@ public:
      : Node("perception_node"), env_(), session_()
     {
         
-        RCLCPP_INFO(
-            this->get_logger(),
-            "perception_node up"
-        );
+        int THREADS_NUMBER {2};
         
         this->declare_parameter<std::string>(
             "model_path",
             "/home/lu/yolo_env/yolo26n.onnx"
         );
+        this->declare_parameter<float>(
+            "confidence_threshold",
+            0.25f
+        )
 
+        
         try
         {
-        std::string model_path = this->get_parameter("model_path").as_string();
-        Ort::SessionOptions opts;
-        opts.SetIntraOpNumThreads(0);
-        session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), opts);
+            Ort::SessionOptions opts;
+            opts.SetIntraOpNumThreads(THREADS_NUMBER);
+
+            std::string model_path = this->get_parameter("model_path").as_string();
+            
+            session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), opts);
         }
         catch (const Ort::Exception& e)
         {
@@ -90,64 +96,102 @@ public:
             throw;
         }
 
-        mem = Ort::MemoryInfo::CreateCpu(
+        mem_ = Ort::MemoryInfo::CreateCpu(
             OrtAllocatorType::OrtDeviceAllocator,
             OrtMemType::OrtMemTypeCPU
         );
         
+        Ort::AllocatorWithDefaultOptions alloc;
+        const auto input_name = session->GenInputNameAllocated(0, alloc);
+        const auto output_name = session->GetOutputNameAllocated(0, alloc);
+
+        std::vector <int64_t> model_input_shape = session_.GetInputTypeAndShapeInfo().GetShape();
+        const int64_t model_input_width = model_input_shape[2];
+        const int64_t model_input_height = model_input_shape[3];
+        
         sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/rgb/image_raw",
             rclcpp::SensorDataQoS(),
-            std::bind(&PerceptionNode::callback, this, std::placeholders::_1)
+            [this](Image::ConstSharedPtr msg) {callback(msg);}
         );
 
         pub_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("/detections", 10);
+
+
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "perception_node up | model_path: %s | input_name: %s | output_name: %s | threads number: %d",
+            model_path, input_name, output_name, THREADS_NUMBER
+        );
     }
 
 private:
 
-    void callback(const sensor_msgs::msg::Image::SharedPtr msg)
+    void callback(sensor_msgs::msg::Image::ConstSharedPtr msg)
     {
         
         cv_bridge::CvImagePtr cv_ptr;
 
-        cv_ptr = cv_bridge::toCvCopy(msg, "bgr8");
-        
+        try
+        {
+            cv_ptr = cv_bridge::toCvCopy(msg, "bgr8");
+        }
+        catch (const cv_bridge::Exception&)
+        {
+            RCLCPP_FATAL_THROTTLED(
+            this->get_logger(),
+            this->get_clock(),
+            1000,
+            "Error while finding model path: %s", e.what()
+            );
+            return;
+        } 
+
         cv::Mat frame = cv_ptr->image;
 
         cv::Mat blob = cv::dnn::blobFromImage(
             frame,
             1.0/255.0,
-            cv::Size(640, 640),
+            cv::Size(model_input_width, model_input_height),
             cv::Scalar(),
             true, // swapRB
             false // crop
         );
                 
-        std::vector<int64_t> shape = {1, 3, 640, 640};
+        std::vector<int64_t> input_shape = {1, 3, 640, 640};
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            mem, blob.ptr<float>(), blob.total(), shape.data(), shape.size());
+            mem_, blob.ptr<float>(), blob.total(), shape.data(), shape.size());
         
-
-        const char* in_names[] = {"images"};
-        const char* out_names[] = {"output0"};
 
         auto outputs = session_->Run(
             Ort::RunOptions{nullptr},
-            in_names, &input_tensor, 1,
-            out_names, 1
+            input_name, &input_tensor, 1,
+            output_name, 1
         );
 
         const float* ptr = outputs[0].GetTensorData<float>();
+        
+        std::vector <int64_t> output_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
+
+        // output shape vector is [batch, rows, columns]. We don't need to check batch.
+        if (output_shape[1] != 300 || output_shape[2] != 6)
+        {
+            throw std::runtime_error(
+                "Model output not matching requiremnts."
+                "Required/Expectted: Rows 300/%d | Columns: 6/%d",
+                outpt_shape[1], output_shape[2]
+            );
+        }
+
         cv::Mat det(300, 6, CV_32F, (void*)ptr);
 
-        double maxv = 0.0;
-        cv::Point maxloc;
-        cv::minMaxLoc(det.col(4), nullptr, &maxv, nullptr, &maxloc);
+        float conf_threshold = this->get_parameter("confidence_threshold");
+
 
         auto det_msg = toDetections(det,
             msg->header,
-            0.25f, msg->width, msg->height);
+            conf_threshold, msg->width, msg->height);
         pub_->publish(det_msg);
         
     }
@@ -157,9 +201,9 @@ private:
 
     std::unique_ptr<Ort::Session> session_;
 
-    Ort::MemoryInfo mem{nullptr};
+    Ort::MemoryInfo mem_{nullptr};
     
-    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_; // + ownership
+    rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_;
     rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr pub_;
 
 };
