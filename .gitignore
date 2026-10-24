@@ -1,4 +1,5 @@
 src/px4_msgs/
+models/*.onnx
 
 
 # Prerequisites

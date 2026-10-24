@@ -72,12 +72,10 @@ class PerceptionNode : public rclcpp::Node
 public:
     PerceptionNode()
      : Node("perception_node"),
-       mem_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator,OrtMemTypeCPU)),
-       env_(),
-       session_()
+       mem_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator,OrtMemTypeCPU))
     {
         
-        int kThreadsNumber {2};
+        constexpr int kThreadsNumber {2};
         
         conf_threshold_ = this->declare_parameter<double>(
             "confidence_threshold",
@@ -134,11 +132,7 @@ public:
 
         const auto out_shape = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
         
-        RCLCPP_INFO(
-            this->get_logger(),
-            "Supposed rows %ld, supposed cols %ld supposed batch %ld",
-            out_shape[0], out_shape[1], out_shape[2]);
-           
+   
         // output shape vector is [batch, rows, columns]. We don't need to check batch.
         if (out_shape[1] != 300 || out_shape[2] != 6)
         {
@@ -147,7 +141,7 @@ public:
             );
         }
 
-        std::vector <int64_t> model_input_shape_ = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        model_input_shape_ = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
         // ONNX is NCHW 
         model_input_height_ = model_input_shape_[2];
         model_input_width_ = model_input_shape_[3];
@@ -158,7 +152,7 @@ public:
             [this](sensor_msgs::msg::Image::ConstSharedPtr msg) {callback(msg);}
         );
 
-        pub_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("/detections", 10);
+        pub_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
 
 
@@ -250,17 +244,7 @@ private:
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    try
-    {
-        rclcpp::spin(std::make_shared<PerceptionNode>());
-    }
-    catch (const std::exception& e)
-    {
-        RCLCPP_FATAL(rclcpp::get_logger("perception_node"), "Startup failed: %s", e.what());
-        rclcpp::shutdown();
-        return 1;
-    }
-
+    rclcpp::spin(std::make_shared<PerceptionNode>());
     rclcpp::shutdown();
     return 0;
 }
