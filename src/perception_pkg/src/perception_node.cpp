@@ -1,7 +1,9 @@
 #include <cmath>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -12,6 +14,9 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include <rcl_interfaces/msg/parameter_descriptor.hpp>
+
+#include <sensor_msgs/image_encodings.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 
 struct DetectionView
@@ -36,7 +41,7 @@ vision_msgs::msg::Detection2DArray toDetections(
 
     for (int r = 0; r < det_view.rows; ++r)
     {
-        const float* row = det_view.ptr<float>(r);
+        const float* row = det_view.data + r * det_view.cols;
 
         if (row[4] < conf_thresh) break; // Output is sorted, 'break' exits early on purpose.
 
@@ -67,29 +72,46 @@ class PerceptionNode : public rclcpp::Node
 public:
     PerceptionNode()
      : Node("perception_node"),
-       mem_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator,OrtMemTypeCPU))
+       mem_(Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator,OrtMemTypeCPU)),
+       env_(),
+       session_()
     {
         
         int kThreadsNumber {2};
         
-        std::string model_path;
-
-        this->declare_parameter<std::string>(
-            "model_path",
-            "/home/lu/yolo_env/yolo26n.onnx"
-        );
-        this->declare_parameter<double>(
+        conf_threshold_ = this->declare_parameter<double>(
             "confidence_threshold",
             0.25
-        ).as_double();
+        );
+        const std::string model_path = this->declare_parameter<std::string>(
+            "model_path",
+            ""
+        );
+
+        if (model_path.empty())
+        {
+            RCLCPP_FATAL(this->get_logger(),
+            "Parameter 'model_path' is not set.");
+
+            throw std::runtime_error("model_path parameter not set");
+        }
+
+        if (!std::filesystem::exists(model_path))
+        {
+            RCLCPP_FATAL(
+                this->get_logger(),
+                "model_path does not exist: %s",
+                model_path.c_str()
+            );
+
+            throw std::runtime_error("model file not found: " + model_path);
+        }
 
         try
         {
             Ort::SessionOptions opts;
-            opts.SetIntraOpNumThreads(THREADS_NUMBER);
-
-            model_path = this->get_parameter("model_path").as_string();
-            
+            opts.SetIntraOpNumThreads(kThreadsNumber);
+                    
             session_ = std::make_unique<Ort::Session>(env_, model_path.c_str(), opts);
         }
         catch (const Ort::Exception& e)
@@ -97,26 +119,43 @@ public:
             RCLCPP_FATAL(
                 this->get_logger(),
                 "Error while finding model path: %s", e.what()
-            );
-            model_path = "invalid";
-            
+            );            
             throw;
         }
-;
         
-        Ort::AllocatorWithDefaultOptions alloc;
-        mode_input_name_ = session_->GetInputNameAllocated(0, alloc);
-        model_output_name_ = session_->GetOutputNameAllocated(0, alloc);
+        {  
+            Ort::AllocatorWithDefaultOptions alloc;
+            Ort::AllocatedStringPtr in = session_->GetInputNameAllocated(0, alloc);
+            Ort::AllocatedStringPtr out = session_->GetOutputNameAllocated(0, alloc);
 
-        std::vector <int64_t> model_input_shape = sesion_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+            model_input_name_  = in.get();
+            model_output_name_ = out.get();
+        }
+
+        const auto out_shape = session_->GetOutputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
+        
+        RCLCPP_INFO(
+            this->get_logger(),
+            "Supposed rows %ld, supposed cols %ld supposed batch %ld",
+            out_shape[0], out_shape[1], out_shape[2]);
+           
+        // output shape vector is [batch, rows, columns]. We don't need to check batch.
+        if (out_shape[1] != 300 || out_shape[2] != 6)
+        {
+            throw std::runtime_error(
+                "Model output not matching requirements."
+            );
+        }
+
+        std::vector <int64_t> model_input_shape_ = session_->GetInputTypeInfo(0).GetTensorTypeAndShapeInfo().GetShape();
         // ONNX is NCHW 
-        model_input_height_ = model_input_shape[2];
-        model_input_width_ = model_input_shape[3];
+        model_input_height_ = model_input_shape_[2];
+        model_input_width_ = model_input_shape_[3];
         
         sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "rgb/image_raw",
             rclcpp::SensorDataQoS(),
-            [this](Image::ConstSharedPtr msg) {callback(msg);}
+            [this](sensor_msgs::msg::Image::ConstSharedPtr msg) {callback(msg);}
         );
 
         pub_ = this->create_publisher<vision_msgs::msg::Detection2DArray>("/detections", 10);
@@ -125,8 +164,7 @@ public:
 
         RCLCPP_INFO(
             this->get_logger(),
-            "perception_node up input_name: %s | output_name: %s | threads number: %d",
-            model_input_name_, model_output_name_, kThreadsNumber
+            "perception_node | threads number: %d", kThreadsNumber
         );
     }
 
@@ -143,11 +181,12 @@ private:
         }
         catch (const cv_bridge::Exception& e)
         {
-            RCLCPP_WARN_THROTTLED(
+            RCLCPP_WARN_THROTTLE(
             this->get_logger(),
-            this->get_clock(),
+            *this->get_clock(),
             1000,
-            "Error while receiving image frames. Dropping the frame."
+            "Error while receiving image frames. Dropping the frame -> %s",
+            e.what()
             );
             return;
         } 
@@ -157,60 +196,53 @@ private:
         cv::Mat blob = cv::dnn::blobFromImage(
             frame,
             1.0/255.0,
-            cv::Size(model_input_width, model_input_height),
-            cv::Scalar(),
-            false // crop
+            cv::Size(model_input_width_, model_input_height_),
+            cv::Scalar()
         );
                 
-        std::vector<int64_t> input_shape = {1, 3, 640, 640};
         Ort::Value input_tensor = Ort::Value::CreateTensor<float>(
-            mem_, blob.ptr<float>(), blob.total(), input_shape.data(), input_shape.size());
+            mem_, blob.ptr<float>(), blob.total(), model_input_shape_.data(), model_input_shape_.size());
         
+        const char* in_names[] = { model_input_name_.c_str() };
+        const char* out_names[] = { model_output_name_.c_str() };
 
         auto outputs = session_->Run(
             Ort::RunOptions{nullptr},
-            model_input_name_, &input_tensor, 1,
-            model_output_name, 1
+            in_names, &input_tensor, 1,
+            out_names, 1
         );
 
         const float* ptr = outputs[0].GetTensorData<float>();
         
         std::vector <int64_t> output_shape = outputs[0].GetTensorTypeAndShapeInfo().GetShape();
 
-        // output shape vector is [batch, rows, columns]. We don't need to check batch.
-        if (output_shape[1] != 300 || output_shape[2] != 6)
-        {
-            throw std::runtime_error(
-                "Model output not matching requirements."
-                "Required/Expectted: Rows 300/%d | Columns: 6/%d",
-                outpt_shape[1], output_shape[2]
-            );
-        }
+        DetectionView det{ptr, static_cast<int>(output_shape[1]), static_cast<int>(output_shape[2])};
 
-        DetectionView det(ptr, output_shape[1], output_shape[2]);
-
-        float conf_threshold = this->get_parameter("confidence_threshold");
 
 
         auto det_msg = toDetections(det,
             msg->header,
-            conf_threshold, msg->width, msg->height,
+            conf_threshold_, msg->width, msg->height,
             model_input_width_, model_input_height_);
         pub_->publish(det_msg);
         
     }
 
-    
+    Ort::MemoryInfo mem_;
+
     Ort::Env env_;
     std::unique_ptr<Ort::Session> session_;
     
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_;
     rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr pub_;
 
-    const char* model_input_name_;
-    const char* model_output_name_;
-    const int64_t model_input_height_;
-    const int64_t model_input_width_;
+    std::string model_input_name_;
+    std::string model_output_name_;
+    std::vector<int64_t> model_input_shape_;
+    int model_input_height_;
+    int model_input_width_;
+
+    double conf_threshold_;
 
 };
 
@@ -218,7 +250,17 @@ private:
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<PerceptionNode>());
+    try
+    {
+        rclcpp::spin(std::make_shared<PerceptionNode>());
+    }
+    catch (const std::exception& e)
+    {
+        RCLCPP_FATAL(rclcpp::get_logger("perception_node"), "Startup failed: %s", e.what());
+        rclcpp::shutdown();
+        return 1;
+    }
+
     rclcpp::shutdown();
     return 0;
 }
