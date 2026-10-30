@@ -38,13 +38,17 @@ public:
             confirm_counter_ = 0;
         }
 
-        if (confirm_counter_ >= n_) {
-            return Event::TARGET_CONFIRMED;
-        } else if (drop_counter_ >= m_) {
-            return Event::TARGET_LOST;
-        } 
+        Event active_event {Event::NO_EVENT};
 
-        return Event::NO_EVENT;
+        if (confirm_counter_ >= n_) {
+            active_event = Event::TARGET_CONFIRMED;
+            confirm_counter_ = 0;
+        } else if (drop_counter_ >= m_) {
+            active_event = Event::TARGET_LOST;
+            drop_counter_ = 0;
+        }
+        
+        return active_event;
 
     }
 private:
