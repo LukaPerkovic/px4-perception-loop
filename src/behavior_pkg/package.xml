@@ -4,13 +4,14 @@
   <name>behavior_pkg</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="luka.m.perkovic@gmail.com">lu</maintainer>
+  <maintainer email="kul.ruka.luka@gmail.com">lu</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>vision_msgs</depend>
+  <test_depend>ament_cmake_gtest</test_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
