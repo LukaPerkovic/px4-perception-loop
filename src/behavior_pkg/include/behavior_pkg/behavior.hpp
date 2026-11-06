@@ -20,6 +20,19 @@ inline State next_state(State current, Event e)
     return current; // unreachable but keeps compiler quiet.
 }
 
+inline const char* to_string(State s)
+{
+    switch (s)
+    {
+    case Event::SEARCH:
+        return "SEARCH";
+    case STATE::TRACK:
+        return "TRACK";
+    }
+
+    return "SEARCH";
+}
+
 
 class FrameFilter
 {
