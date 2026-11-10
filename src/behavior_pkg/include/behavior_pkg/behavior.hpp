@@ -24,9 +24,9 @@ inline const char* to_string(State s)
 {
     switch (s)
     {
-    case Event::SEARCH:
+    case State::SEARCH:
         return "SEARCH";
-    case STATE::TRACK:
+    case State::TRACK:
         return "TRACK";
     }
 

@@ -9,12 +9,12 @@ class BehaviorNode : public rclcpp::Node
 public:
     BehaviorNode()
      : Node("behavior_node"),
-       filter_(3, 3)
+       filter_(3, 5)
     {
         sub_ = create_subscription<vision_msgs::msg::Detection2DArray>(
             "detections",
             10,
-            [this](&BehaviorNode::on_detections msg) {callback(msg);}
+            [this](vision_msgs::msg::Detection2DArray::ConstSharedPtr msg) {on_detections(msg);}
         );
 
         RCLCPP_INFO(get_logger(), "behavior_node up");
@@ -43,13 +43,17 @@ private:
         }
 
         state_ = next;
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+            "valid=%d state=%s", valid, to_string(state_)
+        );
     }
 
     FrameFilter filter_;
     State       state_ { State::SEARCH};
-    double      conf_min_ { 0.5 };
+    double      conf_min_ { 0.6 };
     std::string target_class_ {"0"};
-    rclcpp::Subscription<&BehaviorNode::on_detections>::SharedPtr sub_;
+    rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr sub_;
 
 };
 

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -26,33 +27,80 @@ struct DetectionView
     int cols;
 };
 
+struct LetterboxInfo
+{
+    float scale;
+    int   pad_x;
+    int   pad_y;
+};
+
+
+static LetterboxInfo letterbox(const cv::Mat& src,
+                               cv::Mat& dst,
+                               int net_w,
+                               int net_h,
+                               const cv::Scalar& pad_color = cv::Scalar(114, 114, 144))
+{
+    const float scale = std::min(static_cast<float>(net_w) / static_cast<float>(src.cols),
+                                 static_cast<float>(net_h) / static_cast<float>(src.rows));
+
+    const int new_w = static_cast<int>(std::lround(src.cols * scale));
+    const int new_h = static_cast<int>(std::lround(src.rows * scale));
+
+    const int pad_x = (net_w - new_w) / 2;
+    const int pad_y = (net_h - new_h) / 2;
+
+    cv::Mat resized;
+    cv::resize(src, resized, cv::Size(new_w, new_h), 0, 0, cv::INTER_LINEAR);
+
+    dst.create(net_h, net_w, src.type());
+    dst.setTo(pad_color);
+
+    resized.copyTo(dst(cv::Rect(pad_x, pad_y, new_w, new_h)));
+
+    return LetterboxInfo{scale, pad_x, pad_y};
+
+}
+
 
 vision_msgs::msg::Detection2DArray toDetections(
     const DetectionView& det_view,
     const std_msgs::msg::Header& header,
     float conf_thresh,
-    int src_w, int src_h, float model_w, float model_h)
+    const LetterboxInfo& lb,
+    int src_w, int src_h)
 {
     vision_msgs::msg::Detection2DArray out;
     out.header = header;
 
-    const float x_scale = src_w / model_w;
-    const float y_scale = src_h / model_h;
+    const float inv_scale = 1.0f / lb.scale;
+    const float max_x = static_cast<float>(src_w - 1);
+    const float max_y = static_cast<float>(src_h - 1);
 
     for (int r = 0; r < det_view.rows; ++r)
     {
         const float* row = det_view.data + r * det_view.cols;
 
         if (row[4] < conf_thresh) break; // Output is sorted, 'break' exits early on purpose.
+        
+        float x1 = (row[0] - lb.pad_x) * inv_scale;
+        float y1 = (row[1] - lb.pad_y) * inv_scale;
+        float x2 = (row[2] - lb.pad_x) * inv_scale;
+        float y2 = (row[3] - lb.pad_y) * inv_scale;
+
+        x1 = std::clamp(x1, 0.0f, max_x);
+        y1 = std::clamp(y1, 0.0f, max_y);
+        x2 = std::clamp(x2, 0.0f, max_x);
+        y2 = std::clamp(y2, 0.0f, max_y);
 
         vision_msgs::msg::Detection2D d;
         d.header = header;
 
-        d.bbox.center.position.x = x_scale * (row[0] + row[2]) / 2;
-        d.bbox.center.position.y = y_scale * (row[1] + row[3]) / 2;
+        d.bbox.center.position.x = 0.5f * (x1 + x2);
+        d.bbox.center.position.y = 0.5f * (y1 + y2);
         d.bbox.center.theta      = 0.0;
-        d.bbox.size_x            = x_scale * (row[2] - row[0]);
-        d.bbox.size_y            = y_scale * (row[3] - row[1]);
+        d.bbox.size_x            = x2 - x1;
+        d.bbox.size_y            = y2 - y1;
 
         vision_msgs::msg::ObjectHypothesisWithPose h;
         h.hypothesis.class_id    = std::to_string(std::lround(row[5]));
@@ -187,8 +235,11 @@ private:
 
         cv::Mat frame = cv_ptr->image;
 
+        const LetterboxInfo lb = letterbox(frame, letterboxed_,
+                                           model_input_width_, model_input_height_);
+
         cv::Mat blob = cv::dnn::blobFromImage(
-            frame,
+            letterboxed_,
             1.0/255.0,
             cv::Size(model_input_width_, model_input_height_),
             cv::Scalar()
@@ -216,9 +267,15 @@ private:
 
         auto det_msg = toDetections(det,
             msg->header,
-            conf_threshold_, msg->width, msg->height,
-            model_input_width_, model_input_height_);
+            conf_threshold_,
+            lb,
+            static_cast<int>(msg->width), static_cast<int>(msg->height));
         pub_->publish(det_msg);
+
+
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+            "frame ok: %zu detections", det_msg.detections.size()    
+        );
         
     }
 
@@ -237,6 +294,8 @@ private:
     int model_input_width_;
 
     double conf_threshold_;
+
+    cv::Mat letterboxed_;
 
 };
 
