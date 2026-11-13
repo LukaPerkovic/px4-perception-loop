@@ -1,8 +1,9 @@
 #include <chrono>
-#include <numbers>
+#include <cmath>
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
 
 using namespace std::chrono_literals;
 
@@ -51,8 +52,8 @@ private:
         px4_msgs::msg::TrajectorySetpoint msg{};
 
         msg.position = {0.0f, 0.0f, -2.0f};
-        msg.yaw = std::numbers::pi_v<float> / 2.0f;
-        msg.timestmap = this->get_clock()->now().nanoseconds() / 1000;
+        msg.yaw = M_PI_4f32 / 2.0f;
+        msg.timestamp = this->get_clock()->now().nanoseconds() / 1000;
         trajectory_setpoint_pub_->publish(msg);
     }
 
