@@ -1,13 +1,18 @@
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_land_detected.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 
+#include "vehicle_interface_pkg/vehicle_interface.hpp"
+
 using namespace std::chrono_literals;
+
 
 class VehicleInterfaceNode : public rclcpp::Node
 {
@@ -31,23 +36,25 @@ public:
             "/fmu/out/vehicle_status_v4",
             qos,
             [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr msg) {
+
+                status_seen_ = true;
+
+                if (msg->arming_state != arming_state_ || msg->nav_state != nav_state_) {
+                    RCLCPP_INFO(get_logger(),
+                            "PX4: arming %d->%d nav %d->%d",
+                            arming_state_, msg->arming_state,
+                            nav_state_, msg->nav_state);
+                }
                 arming_state_ = msg->arming_state;
-                nav_state_ = msg->nav_state;
+                nav_state_    = msg->nav_state;
+                failsafe_     = msg->failsafe;
             }
+
+            
         );
 
 
-        
-        timer_ = this->create_wall_timer(
-            75ms,
-            [this]() {
-                const uint64_t ts = this->get_clock()->now().nanoseconds() / 1000;
-                publish_offboard_control_mode(ts);
-                publish_trajectory_setpoint(ts);
-                reconcile(ts);
-
-            }
-        );
+        timer_ = this->create_wall_timer(kTimerPeriod, [this](){ on_timer(); });
 
 
         RCLCPP_INFO(this->get_logger(), "vehicle_interface_node up.");
@@ -56,6 +63,30 @@ public:
 
 
 private:
+
+    // approximate number of 75 milisecond ticks per 2 seconds
+    static constexpr auto     kTimerPeriod      = 75ms;
+    static constexpr uint64_t kWarmupTicks      = 27;
+    static constexpr uint64_t kCmdCooldownTicks = 27;
+    static constexpr uint64_t kTakeoffTick      = 27;    // temp scafold
+    static constexpr uint64_t kLandTick         = 294;   // temp scafold
+
+    void on_timer()
+    {
+        ++tick_;
+        const uint64_t ts = get_clock()->now().nanoseconds() / 1000; // microseconds
+
+        publish_offboard_control_mode(ts);
+        publish_trajectory_setpoint(ts);
+
+        advance_mission_TEMP();
+        reconcile(ts);
+    
+        RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
+            "tick=%lu goal=%s arming=%d nav=%d failsafe=%d",
+             tick_, to_string(goal_), arming_state_, nav_state_, (int)failsafe_);
+
+    }
 
     void publish_offboard_control_mode(const uint64_t timestamp)
     {
@@ -83,6 +114,75 @@ private:
         trajectory_setpoint_pub_->publish(msg);
     }
 
+    void set_goal(LinkGoal g)
+    {
+        if (g == goal_) return;
+        RCLCPP_INFO(get_logger(), "goal %s -> %s", to_string(goal_), to_string(g));
+        goal_ = g;
+        last_cmd_tick_ = 0;
+    }
+
+    void advance_mission_TEMP()
+    {
+        if (tick_ == kTakeoffTick) set_goal(LinkGoal::FLYING);
+        if (tick_ == kLandTick)    set_goal(LinkGoal::LANDING);
+    }
+
+    void reconcile(uint64_t timestamp)
+    {
+        if (!status_seen_) {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                "no VehicleStatus yet - not commanding");
+            return;
+        }
+        
+        if (failsafe_ && goal_ == LinkGoal::FLYING)
+        {
+            RCLCPP_WARN(get_logger(), "failsafe active, surrendering control");
+            set_goal(LinkGoal::IDLE);
+            return;
+        }
+
+        if (tick_ < kWarmupTicks) return;                       // warm-up; ~2 secs
+        if (tick_ - last_cmd_tick_ < kCmdCooldownTicks) return; // cooldown
+
+        switch (goal_) {
+        case LinkGoal::IDLE:
+            break;
+
+        case LinkGoal::FLYING:
+            if (nav_state_ != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD){
+                send_cmd(
+                    px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE,
+                    1.0f, 6.0f, timestamp, "request OFFBOARD");
+
+            } else if (arming_state_ != px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED) {
+            send_cmd(
+                px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                1.0f, 0.0f, timestamp, "request ARM");
+            }
+            break;
+        
+        case LinkGoal::LANDING:
+            if (arming_state_ == px4_msgs::msg::VehicleStatus::ARMING_STATE_DISARMED) {
+                RCLCPP_INFO(get_logger(), "landed and disarmed");
+                set_goal(LinkGoal::IDLE);
+            } else if (nav_state_ != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LAND) {
+                send_cmd(px4_msgs::msg::VehicleCommand::VEHICLE_CMD_NAV_LAND,
+                0.0f, 0.0f, timestamp, "request LAND");
+            }
+            break;
+ 
+        }
+    }
+
+    void send_cmd(uint32_t command, float param1, float param2, uint64_t timestamp, const char * what)
+    {
+        publish_vehicle_command(command, param1, param2, timestamp);
+        last_cmd_tick_ = tick_;
+        RCLCPP_INFO(get_logger(), "%s", what);
+    }
+
     void publish_vehicle_command(uint16_t command, float param1, float param2, uint64_t timestamp)
     {
 
@@ -101,51 +201,24 @@ private:
         vehicle_command_pub_->publish(msg);
 
     }
-    
-    void reconcile(uint64_t timestamp)
-    {
-        ++tick_;
 
-        uint64_t tick_limit { 30000 }; // approximate number of 75 microsecond ticks per 2 seconds
-
-        if (tick_ < tick_limit) return;                  // warm-up; ~2 secs
-
-        if (tick_ - last_cmd_tick_ < tick_limit) return; // cooldown
-
-        if (nav_state_ != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD){
-            publish_vehicle_command(
-                px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE,
-                1.0f, 6.0f, timestamp);
-            last_cmd_tick_ = tick_;
-            RCLCPP_INFO(this->get_logger(), "requesting OFFBOARD");
-            
-            return;
-        } 
-
-        if (arming_state_ != px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED) {
-            publish_vehicle_command(
-                px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM,
-                1.0f, 0.0f, timestamp);
-            RCLCPP_INFO(this->get_logger(), "requsting ARM");
-        }
-    }
-
-
-
-    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_mode_pub_;
-    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr trajectory_setpoint_pub_;
-    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr vehicle_command_pub_;
-
-    
-    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
-    
-    rclcpp::TimerBase::SharedPtr timer_;
 
     uint8_t arming_state_ {0};
     uint8_t nav_state_ {0};
+    bool    failsafe_ {false};
+    bool    status_seen_ {false};
+
+    LinkGoal goal_ {LinkGoal::IDLE};
 
     uint64_t tick_ {0};
     uint64_t last_cmd_tick_ {0};
+
+
+    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_mode_pub_;
+    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr  trajectory_setpoint_pub_;
+    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr      vehicle_command_pub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr    status_sub_;
+    rclcpp::TimerBase::SharedPtr                                     timer_;
 
 };
 
