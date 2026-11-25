@@ -10,8 +10,21 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 
 #include "vehicle_interface_pkg/vehicle_interface.hpp"
+#include "uav_interfaces/msg/target_intent.hpp"
 
 using namespace std::chrono_literals;
+
+static LinkGoal goal_for_state(uint8_t s)
+{
+    using TI = uav_interfaces::msg::TargetIntent;
+    switch (s) {
+        case TI::STATE_SEARCH:    return LinkGoal::FLYING;
+        case TI::STATE_TRACK:     return LinkGoal::FLYING;
+        case TI::STATE_REACQUIRE: return LinkGoal::FLYING;
+        case TI::STATE_LAND:      return LinkGoal::LANDING;
+        default:                  return LinkGoal::IDLE;
+    }
+}
 
 
 class VehicleInterfaceNode : public rclcpp::Node
@@ -48,10 +61,18 @@ public:
                 arming_state_ = msg->arming_state;
                 nav_state_    = msg->nav_state;
                 failsafe_     = msg->failsafe;
-            }
+                }
+            );
 
-            
+        intent_sub_ = create_subscription<uav_interfaces::msg::TargetIntent>(
+            "target_intent", 10,
+            [this](uav_interfaces::msg::TargetIntent::ConstSharedPtr msg) {
+                intent_seen_  = true;
+                last_intent_tick_ = tick_;
+                set_goal(goal_for_state(msg->state));
+            }
         );
+
 
 
         timer_ = this->create_wall_timer(kTimerPeriod, [this](){ on_timer(); });
@@ -65,11 +86,11 @@ public:
 private:
 
     // approximate number of 75 milisecond ticks per 2 seconds
-    static constexpr auto     kTimerPeriod      = 75ms;
-    static constexpr uint64_t kWarmupTicks      = 27;
-    static constexpr uint64_t kCmdCooldownTicks = 27;
-    static constexpr uint64_t kTakeoffTick      = 27;    // temp scafold
-    static constexpr uint64_t kLandTick         = 294;   // temp scafold
+    static constexpr auto     kTimerPeriod        = 75ms;
+    static constexpr uint64_t kWarmupTicks        = 27;
+    static constexpr uint64_t kCmdCooldownTicks   = 27;
+    static constexpr uint64_t kIntentTimeoutTicks = 40;  // ~3s at 13.3h
+
 
     void on_timer()
     {
@@ -79,7 +100,13 @@ private:
         publish_offboard_control_mode(ts);
         publish_trajectory_setpoint(ts);
 
-        advance_mission_TEMP();
+        if (intent_seen_ &&
+            tick_ - last_intent_tick_ > kIntentTimeoutTicks &&
+            goal_ == LinkGoal::FLYING)
+        {
+            RCLCPP_WARN(get_logger(), "intent_stale - landing");
+            set_goal(LinkGoal::LANDING);
+        }
         reconcile(ts);
     
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
@@ -120,12 +147,6 @@ private:
         RCLCPP_INFO(get_logger(), "goal %s -> %s", to_string(goal_), to_string(g));
         goal_ = g;
         last_cmd_tick_ = 0;
-    }
-
-    void advance_mission_TEMP()
-    {
-        if (tick_ == kTakeoffTick) set_goal(LinkGoal::FLYING);
-        if (tick_ == kLandTick)    set_goal(LinkGoal::LANDING);
     }
 
     void reconcile(uint64_t timestamp)
@@ -207,18 +228,21 @@ private:
     uint8_t nav_state_ {0};
     bool    failsafe_ {false};
     bool    status_seen_ {false};
+    bool    intent_seen_ {false};
 
     LinkGoal goal_ {LinkGoal::IDLE};
 
     uint64_t tick_ {0};
     uint64_t last_cmd_tick_ {0};
+    uint64_t last_intent_tick_ {0};
 
 
-    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr offboard_mode_pub_;
-    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr  trajectory_setpoint_pub_;
-    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr      vehicle_command_pub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr    status_sub_;
-    rclcpp::TimerBase::SharedPtr                                     timer_;
+    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr   offboard_mode_pub_;
+    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr    trajectory_setpoint_pub_;
+    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr        vehicle_command_pub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr      status_sub_;
+    rclcpp::Subscription<uav_interfaces::msg::TargetIntent>::SharedPtr intent_sub_;
+    rclcpp::TimerBase::SharedPtr                                       timer_;
 
 };
 

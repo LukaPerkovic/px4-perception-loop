@@ -1,7 +1,24 @@
+#include <chrono>
+
 #include <rclcpp/rclcpp.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 
 #include "behavior_pkg/behavior.hpp"
+#include "uav_interfaces/msg/target_intent.hpp"
+
+using namespace std::chrono_literals;
+
+static uint8_t to_msg_state(State s)
+{
+    using TI = uav_interfaces::msg::TargetIntent;
+    switch (s)
+    {
+    case State::SEARCH: return TI::STATE_SEARCH;
+    case State::TRACK:  return TI::STATE_TRACK;
+    }
+
+    return TI::STATE_UNKNOWN;
+}
 
 
 class BehaviorNode : public rclcpp::Node
@@ -11,9 +28,12 @@ public:
      : Node("behavior_node"),
        filter_(3, 5)
     {
+        intent_pub_ = create_publisher<uav_interfaces::msg::TargetIntent>("target_intent", 10);
+        intent_timer_ = create_wall_timer(kIntentPeriod, [this]() { publish_intent(); });
+
         sub_ = create_subscription<vision_msgs::msg::Detection2DArray>(
             "detections",
-            10,
+            10, // plain RELIABLE/VOLATILE
             [this](vision_msgs::msg::Detection2DArray::ConstSharedPtr msg) {on_detections(msg);}
         );
 
@@ -21,6 +41,18 @@ public:
     }
 
 private:
+
+    static constexpr auto kIntentPeriod = 100ms;
+
+    void publish_intent()
+    {
+        uav_interfaces::msg::TargetIntent msg;
+        msg.header.stamp = now();
+        msg.state        = to_msg_state(state_);
+        msg.target_valid = false;
+        intent_pub_->publish(msg);
+    }
+
     bool frame_has_target(const vision_msgs::msg::Detection2DArray& msg) const
     {
         for (const auto& d : msg.detections) {
@@ -50,10 +82,14 @@ private:
     }
 
     FrameFilter filter_;
-    State       state_ { State::SEARCH};
+    State       state_ { State::SEARCH };
     double      conf_min_ { 0.6 };
     std::string target_class_ {"0"};
+
+    rclcpp::Publisher<uav_interfaces::msg::TargetIntent>::SharedPtr     intent_pub_;
+    rclcpp::TimerBase::SharedPtr                                        intent_timer_;
     rclcpp::Subscription<vision_msgs::msg::Detection2DArray>::SharedPtr sub_;
+
 
 };
 

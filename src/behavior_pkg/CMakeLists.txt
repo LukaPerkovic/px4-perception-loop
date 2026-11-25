@@ -9,10 +9,11 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(vision_msgs REQUIRED)
+find_package(uav_interfaces REQUIRED)
 
 add_executable(behavior_node src/behavior_node.cpp)
 target_include_directories(behavior_node PRIVATE include)
-ament_target_dependencies(behavior_node rclcpp vision_msgs)
+ament_target_dependencies(behavior_node rclcpp vision_msgs uav_interfaces)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
