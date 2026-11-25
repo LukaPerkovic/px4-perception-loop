@@ -51,6 +51,7 @@ public:
             [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr msg) {
 
                 status_seen_ = true;
+                last_status_tick_ = tick_;
 
                 if (msg->arming_state != arming_state_ || msg->nav_state != nav_state_) {
                     RCLCPP_INFO(get_logger(),
@@ -90,7 +91,7 @@ private:
     static constexpr uint64_t kWarmupTicks        = 27;
     static constexpr uint64_t kCmdCooldownTicks   = 27;
     static constexpr uint64_t kIntentTimeoutTicks = 40;  // ~3s at 13.3h
-
+    static constexpr uint64_t kStatusStaleTicks   = 14;  // placeholder
 
     void on_timer()
     {
@@ -99,6 +100,18 @@ private:
 
         publish_offboard_control_mode(ts);
         publish_trajectory_setpoint(ts);
+
+        const bool stale = status_seen_ && (tick_ - last_status_tick_) > kStatusStaleTicks;
+
+        if (stale && !status_blind_)
+        {
+            status_blind_ = true;
+            RCLCPP_ERROR(get_logger(), "vehicle_status stale (%lu ticks) - going hands-off",
+                static_cast<unsigned long>(tick_ - last_status_tick_));
+        } else if (!stale && status_blind_) {
+            status_blind_ = false;
+            RCLCPP_WARN(get_logger(), "vehicle_status recovered");
+        }
 
         if (intent_seen_ &&
             tick_ - last_intent_tick_ > kIntentTimeoutTicks &&
@@ -151,9 +164,10 @@ private:
 
     void reconcile(uint64_t timestamp)
     {
-        if (!status_seen_) {
+        
+        if (!status_seen_ || status_blind_) {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                "no VehicleStatus yet - not commanding");
+                "no VehicleStatus - not commanding");
             return;
         }
         
@@ -226,15 +240,18 @@ private:
 
     uint8_t arming_state_ {0};
     uint8_t nav_state_ {0};
-    bool    failsafe_ {false};
-    bool    status_seen_ {false};
-    bool    intent_seen_ {false};
+
+    bool failsafe_    {false};
+    bool status_seen_ {false};
+    bool intent_seen_ {false};
+    bool status_blind_{false};
 
     LinkGoal goal_ {LinkGoal::IDLE};
 
-    uint64_t tick_ {0};
-    uint64_t last_cmd_tick_ {0};
+    uint64_t tick_             {0};
+    uint64_t last_cmd_tick_    {0};
     uint64_t last_intent_tick_ {0};
+    uint64_t last_status_tick_ {0};
 
 
     rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr   offboard_mode_pub_;
