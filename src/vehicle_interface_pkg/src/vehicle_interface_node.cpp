@@ -1,12 +1,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <optional>
 
 #include <rclcpp/rclcpp.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command.hpp>
 #include <px4_msgs/msg/vehicle_land_detected.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 
 #include "vehicle_interface_pkg/vehicle_interface.hpp"
@@ -32,6 +34,13 @@ class VehicleInterfaceNode : public rclcpp::Node
 public:
     VehicleInterfaceNode() : Node("vehicle_interface_node")
     {
+
+
+        takeoff_alt_m_ = declare_parameter<double>("takeoff_alt_m", 2.0);
+        auto_recover_  = declare_parameter<bool>("auto_recover_from_failsafe", false);
+
+        RCLCPP_INFO(get_logger(), "params: takoff_alt=%.2f m auto_recover=%s",
+                        takeoff_alt_m_, auto_recover_ ? "true": "false");
 
         auto qos = rclcpp::SensorDataQoS();
 
@@ -74,7 +83,14 @@ public:
             }
         );
 
+        pos_sub_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+            "/fmu/out/vehicle_local_position_v1", qos,
+            [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr msg) {
+                on_local_position(msg);
+            }
+        );
 
+        
 
         timer_ = this->create_wall_timer(kTimerPeriod, [this](){ on_timer(); });
 
@@ -91,15 +107,24 @@ private:
     static constexpr uint64_t kWarmupTicks        = 27;
     static constexpr uint64_t kCmdCooldownTicks   = 27;
     static constexpr uint64_t kIntentTimeoutTicks = 40;  // ~3s at 13.3h
-    static constexpr uint64_t kStatusStaleTicks   = 14;  // placeholder
+    static constexpr uint64_t kStatusStaleTicks   = 28;
+    static constexpr uint64_t kRecoverTicks       = 27;
+    static constexpr uint64_t kAirborneAltM       = 1.0F;
 
     void on_timer()
     {
         ++tick_;
         const uint64_t ts = get_clock()->now().nanoseconds() / 1000; // microseconds
 
-        publish_offboard_control_mode(ts);
-        publish_trajectory_setpoint(ts);
+        if (!hold_.has_value() && local_pos_.has_value()) {
+            hold_ = *local_pos_;
+        }
+
+        if (hold_.has_value())
+        {
+            publish_offboard_control_mode(ts);
+            publish_trajectory_setpoint(hold_, ts);
+        }
 
         const bool stale = status_seen_ && (tick_ - last_status_tick_) > kStatusStaleTicks;
 
@@ -120,12 +145,26 @@ private:
             RCLCPP_WARN(get_logger(), "intent_stale - landing");
             set_goal(LinkGoal::LANDING);
         }
+
+        if (arming_state_ == px4_msgs::msg::VehicleStatus::ARMING_STATE_DISARMED
+                && local_pos_.has_value()) {
+                    ground_z_ = local_pos_->z;
+                }
+
         reconcile(ts);
     
         RCLCPP_INFO_THROTTLE(this->get_logger(), *this->get_clock(), 1000,
             "tick=%lu goal=%s arming=%d nav=%d failsafe=%d",
              tick_, to_string(goal_), arming_state_, nav_state_, (int)failsafe_);
 
+    }
+
+    void on_local_position(px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr msg)
+    {
+        if (msg->xy_valid && msg->z_valid) {
+            local_pos_ = NedPoint{msg->x, msg->y, msg->z};
+            last_pos_tick_ = tick_;
+        }
     }
 
     void publish_offboard_control_mode(const uint64_t timestamp)
@@ -143,11 +182,11 @@ private:
         offboard_mode_pub_->publish(msg);
     }
 
-    void publish_trajectory_setpoint(const uint64_t timestamp)
+    void publish_trajectory_setpoint(const std::optional<NedPoint> point, const uint64_t timestamp)
     {
         px4_msgs::msg::TrajectorySetpoint msg{};
 
-        msg.position = {0.0f, 0.0f, -2.0f};
+        msg.position = {point->x, point->y, point->z};
         msg.yaw = NAN;
         msg.timestamp = timestamp;
 
@@ -156,7 +195,25 @@ private:
 
     void set_goal(LinkGoal g)
     {
+        if (surrendered_ && g != LinkGoal::IDLE) { return; };
         if (g == goal_) return;
+
+        if (local_pos_.has_value()) {
+            hold_ = (g == LinkGoal::FLYING)
+                ? NedPoint{
+                    local_pos_->x,
+                    local_pos_->y,
+                    local_pos_->z - static_cast<float>(takeoff_alt_m_)}
+                : *local_pos_;
+
+            RCLCPP_INFO(get_logger(), "hold point captured: %.2f %.2f %.2f",
+                hold_->x, hold_->y, hold_->z);
+        }
+
+        if (g != LinkGoal::FLYING) {
+            hold_.reset();
+        }
+
         RCLCPP_INFO(get_logger(), "goal %s -> %s", to_string(goal_), to_string(g));
         goal_ = g;
         last_cmd_tick_ = 0;
@@ -170,12 +227,32 @@ private:
                 "no VehicleStatus - not commanding");
             return;
         }
+
+        if (!local_pos_.has_value()) { return; };
         
-        if (failsafe_ && goal_ == LinkGoal::FLYING)
+        if (failsafe_)
         {
-            RCLCPP_WARN(get_logger(), "failsafe active, surrendering control");
-            set_goal(LinkGoal::IDLE);
-            return;
+            last_failsafe_tick_ = tick_;
+            if (!surrendered_)
+            {
+                surrendered_ = true;
+                RCLCPP_WARN(get_logger(), "PX4 failsafe active, surrendering control");
+                set_goal(LinkGoal::IDLE);
+            }
+        }
+
+        if (surrendered_)
+        {
+            const bool clean = !failsafe_ && (tick_ - last_failsafe_tick_) >= kRecoverTicks;
+            const bool airborne_now = airborne();
+
+            if (auto_recover_ && clean && airborne_now)
+            {
+                surrendered_ = false;
+                RCLCPP_WARN(get_logger(), "failsafe cleared, still armed - resuming");
+            } else {
+                return;
+            }
         }
 
         if (tick_ < kWarmupTicks) return;                       // warm-up; ~2 secs
@@ -218,6 +295,14 @@ private:
         RCLCPP_INFO(get_logger(), "%s", what);
     }
 
+    bool airborne() const
+    {
+        if (arming_state_ != px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED) { return false; }
+        if (!ground_z_.has_value() || !local_pos_.has_value())                 { return false; }
+        return (*ground_z_ - local_pos_->z) > kAirborneAltM;
+    }
+
+
     void publish_vehicle_command(uint16_t command, float param1, float param2, uint64_t timestamp)
     {
 
@@ -237,29 +322,41 @@ private:
 
     }
 
+    // --- Observed ---
+    uint8_t arming_state_              {0};
+    uint8_t nav_state_                 {0};
+    bool    status_seen_               {false};
+    bool    failsafe_                  {false};
+    std::optional<NedPoint> local_pos_ {};
+    std::optional<float>    ground_z_  {};
 
-    uint8_t arming_state_ {0};
-    uint8_t nav_state_ {0};
+    // --- Desired ---
+    LinkGoal                goal_ {LinkGoal::IDLE};
+    std::optional<NedPoint> hold_ {};
 
-    bool failsafe_    {false};
-    bool status_seen_ {false};
-    bool intent_seen_ {false};
-    bool status_blind_{false};
+    // --- Bookkeeping ---
+    bool intent_seen_  {false};
+    bool status_blind_ {false};
+    bool surrendered_  {false};
+    
+    uint64_t tick_               {0};
+    uint64_t last_cmd_tick_      {0};
+    uint64_t last_intent_tick_   {0};
+    uint64_t last_status_tick_   {0};
+    uint64_t last_failsafe_tick_ {0};
+    uint64_t last_pos_tick_      {0};
+    
+    // --- Parameters ---
+    bool   auto_recover_ {false};
+    double takeoff_alt_m_ {2.0};
 
-    LinkGoal goal_ {LinkGoal::IDLE};
-
-    uint64_t tick_             {0};
-    uint64_t last_cmd_tick_    {0};
-    uint64_t last_intent_tick_ {0};
-    uint64_t last_status_tick_ {0};
-
-
-    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr   offboard_mode_pub_;
-    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr    trajectory_setpoint_pub_;
-    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr        vehicle_command_pub_;
-    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr      status_sub_;
-    rclcpp::Subscription<uav_interfaces::msg::TargetIntent>::SharedPtr intent_sub_;
-    rclcpp::TimerBase::SharedPtr                                       timer_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr        status_sub_;
+    rclcpp::Subscription<uav_interfaces::msg::TargetIntent>::SharedPtr   intent_sub_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr pos_sub_;
+    rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr     offboard_mode_pub_;
+    rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr      trajectory_setpoint_pub_;
+    rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr          vehicle_command_pub_;
+    rclcpp::TimerBase::SharedPtr                                         timer_;
 
 };
 

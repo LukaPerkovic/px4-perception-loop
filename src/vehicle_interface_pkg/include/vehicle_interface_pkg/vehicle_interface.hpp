@@ -14,3 +14,16 @@ inline const char* to_string(LinkGoal g)
 
     return "UNKNOWN";
 }
+
+struct NedPoint {
+    float x{0.F}; //North
+    float y{0.F}; //East
+    float z{0.F}; //Down (positive)
+};
+
+
+struct EnuPoint {
+    float x{0.F}; //East
+    float y{0.F}; //North
+    float z{0.F}; //Up (positive)
+};
