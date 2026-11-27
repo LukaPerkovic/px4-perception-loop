@@ -1,3 +1,6 @@
+#pragma once
+
+#include <cstdint>
 #include <optional>
 
 enum class LinkGoal {IDLE, FLYING, LANDING};
@@ -32,32 +35,24 @@ struct EnuPoint {
 
 
 enum class Freshness {NEVER_SEEN, FRESH, STALE};
-enum class TickStream {CMD, INTENT, STATUS, FAILSAFE, POS}
 
-struct FreshnessStatus
+struct StreamWatch
 {
-    std::optional<uint64_t> last_cmd_tick      {};
-    std::optional<uint64_t> last_intent_tick   {};
-    std::optional<uint64_t> last_status_tick   {};
-    std::optional<uint64_t> last_failsafe_tick {};
-    std::optional<uint64_t> last_pos_tick      {};
+    std::optional<uint64_t> last_seen_tick_ {};
 
-    Freshness check(TickStream tstr, uint64_t current_tick, uint64_t max_age) const
+    void mark_seen(uint64_t tick)
+    {
+        last_seen_tick_ = tick;
+    }
+
+    Freshness check(uint64_t current_tick, uint64_t max_age) const
     {   
-        std::optional<uint64_t> val {};
-        switch tstr
-        {
-            case TickStream::CMD:      val = last_cmd_tick;
-            case TickStream::INTENT:   val = last_intent_tick;
-            case TickStream::STATUS:   val = last_status_tick;
-            case TickStream::FAILSAFE: val = last_failsafe_tick;
-            case TickStream::POS:      val = last_pos_tick;
-
-            default: return Freshness::NEVER_SEEN;
+        uint64_t age {  };
+        if (!last_seen_tick.has_value()) { return Freshness::NEVER_SEEN; }
+        if (current_tick - last_seen_tick_ < max_age)  { 
+            return Freshness::FRESH; 
+        } else { 
+            return Freshness::STALE;
         }
-
-        if (!val.has_value()) { return Freshness::NEVER_SEEN; }
-        if (current_tick + val < max_age) { return Freshness::FRESH; }
-        if (current_tick + val > max_age) { return Freshness::STALE; }
     }
 };     

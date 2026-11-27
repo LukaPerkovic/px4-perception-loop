@@ -51,7 +51,7 @@ public:
             "/fmu/in/trajectory_setpoint", qos);
 
         vehicle_command_pub_ = this->create_publisher<px4_msgs::msg::VehicleCommand>(
-            "/fmu/in/vehicle_command", qos);
+            "/fmu/in/vehicle_command", 10); // RELIABLE since it's edge-triggered
 
 
         status_sub_ = this->create_subscription<px4_msgs::msg::VehicleStatus>(
@@ -104,12 +104,12 @@ private:
 
     // approximate number of 75 milisecond ticks per 2 seconds
     static constexpr auto     kTimerPeriod        = 75ms;
+    static constexpr float    kAirborneAltM       = 1.0F;
     static constexpr uint64_t kWarmupTicks        = 27;
     static constexpr uint64_t kCmdCooldownTicks   = 27;
     static constexpr uint64_t kIntentTimeoutTicks = 40;  // ~3s at 13.3h
     static constexpr uint64_t kStatusStaleTicks   = 28;
     static constexpr uint64_t kRecoverTicks       = 27;
-    static constexpr uint64_t kAirborneAltM       = 1.0F;
 
     void on_timer()
     {
@@ -195,7 +195,7 @@ private:
 
     void set_goal(LinkGoal g)
     {
-        if (surrendered_ && g != LinkGoal::IDLE) { return; };
+        if (surrendered_ && g != LinkGoal::IDLE) { return; }
         if (g == goal_) return;
 
         if (local_pos_.has_value()) {
@@ -208,10 +208,6 @@ private:
 
             RCLCPP_INFO(get_logger(), "hold point captured: %.2f %.2f %.2f",
                 hold_->x, hold_->y, hold_->z);
-        }
-
-        if (g != LinkGoal::FLYING) {
-            hold_.reset();
         }
 
         RCLCPP_INFO(get_logger(), "goal %s -> %s", to_string(goal_), to_string(g));
@@ -228,7 +224,7 @@ private:
             return;
         }
 
-        if (!local_pos_.has_value()) { return; };
+        if (!local_pos_.has_value()) { return; }    
         
         if (failsafe_)
         {
@@ -288,7 +284,7 @@ private:
         }
     }
 
-    void send_cmd(uint32_t command, float param1, float param2, uint64_t timestamp, const char * what)
+    void send_cmd(uint16_t command, float param1, float param2, uint64_t timestamp, const char * what)
     {
         publish_vehicle_command(command, param1, param2, timestamp);
         last_cmd_tick_ = tick_;
