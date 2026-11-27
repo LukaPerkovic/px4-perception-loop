@@ -60,7 +60,7 @@ public:
             [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr msg) {
 
                 status_seen_ = true;
-                last_status_tick_ = tick_;
+                status_watch_.mark_seen(tick_);
 
                 if (msg->arming_state != arming_state_ || msg->nav_state != nav_state_) {
                     RCLCPP_INFO(get_logger(),
@@ -78,7 +78,7 @@ public:
             "target_intent", 10,
             [this](uav_interfaces::msg::TargetIntent::ConstSharedPtr msg) {
                 intent_seen_  = true;
-                last_intent_tick_ = tick_;
+                intent_watch_.mark_seen(tick_);
                 set_goal(goal_for_state(msg->state));
             }
         );
@@ -123,23 +123,25 @@ private:
         if (hold_.has_value())
         {
             publish_offboard_control_mode(ts);
-            publish_trajectory_setpoint(hold_, ts);
+            publish_trajectory_setpoint(*hold_, ts);
         }
 
-        const bool stale = status_seen_ && (tick_ - last_status_tick_) > kStatusStaleTicks;
+        const Freshness fs = status_watch_.check(tick_, kStatusStaleTicks);
+        const bool stale = (fs == Freshness::STALE);
 
         if (stale && !status_blind_)
         {
             status_blind_ = true;
             RCLCPP_ERROR(get_logger(), "vehicle_status stale (%lu ticks) - going hands-off",
-                static_cast<unsigned long>(tick_ - last_status_tick_));
+                static_cast<unsigned long>(tick_ - *status_watch_.last_seen_tick));
         } else if (!stale && status_blind_) {
             status_blind_ = false;
             RCLCPP_WARN(get_logger(), "vehicle_status recovered");
         }
 
+        const Freshness fi = intent_watch_.check(tick_, kIntentTimeoutTicks);
         if (intent_seen_ &&
-            tick_ - last_intent_tick_ > kIntentTimeoutTicks &&
+            fi == Freshness::STALE &&
             goal_ == LinkGoal::FLYING)
         {
             RCLCPP_WARN(get_logger(), "intent_stale - landing");
@@ -163,7 +165,7 @@ private:
     {
         if (msg->xy_valid && msg->z_valid) {
             local_pos_ = NedPoint{msg->x, msg->y, msg->z};
-            last_pos_tick_ = tick_;
+            pos_watch_.mark_seen(tick_);
         }
     }
 
@@ -182,11 +184,11 @@ private:
         offboard_mode_pub_->publish(msg);
     }
 
-    void publish_trajectory_setpoint(const std::optional<NedPoint> point, const uint64_t timestamp)
+    void publish_trajectory_setpoint(const NedPoint& point, const uint64_t timestamp)
     {
         px4_msgs::msg::TrajectorySetpoint msg{};
 
-        msg.position = {point->x, point->y, point->z};
+        msg.position = {point.x, point.y, point.z};
         msg.yaw = NAN;
         msg.timestamp = timestamp;
 
@@ -337,10 +339,11 @@ private:
     
     uint64_t tick_               {0};
     uint64_t last_cmd_tick_      {0};
-    uint64_t last_intent_tick_   {0};
-    uint64_t last_status_tick_   {0};
     uint64_t last_failsafe_tick_ {0};
-    uint64_t last_pos_tick_      {0};
+
+    StreamWatch status_watch_;
+    StreamWatch intent_watch_;
+    StreamWatch pos_watch_;
     
     // --- Parameters ---
     bool   auto_recover_ {false};

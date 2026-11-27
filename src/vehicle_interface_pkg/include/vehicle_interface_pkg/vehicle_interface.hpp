@@ -38,18 +38,17 @@ enum class Freshness {NEVER_SEEN, FRESH, STALE};
 
 struct StreamWatch
 {
-    std::optional<uint64_t> last_seen_tick_ {};
+    std::optional<uint64_t> last_seen_tick {};
 
     void mark_seen(uint64_t tick)
     {
-        last_seen_tick_ = tick;
+        last_seen_tick = tick;
     }
 
     Freshness check(uint64_t current_tick, uint64_t max_age) const
     {   
-        uint64_t age {  };
         if (!last_seen_tick.has_value()) { return Freshness::NEVER_SEEN; }
-        if (current_tick - last_seen_tick_ < max_age)  { 
+        if (current_tick - *last_seen_tick <= max_age)  { 
             return Freshness::FRESH; 
         } else { 
             return Freshness::STALE;

@@ -16,13 +16,11 @@ add_executable(vehicle_interface_node src/vehicle_interface_node.cpp)
 target_include_directories(vehicle_interface_node PRIVATE include)
 ament_target_dependencies(vehicle_interface_node rclcpp px4_msgs uav_interfaces)
 
-install(TARGETS
-  vehicle_interface_node
-  DESTINATION lib/${PROJECT_NAME}
-)
-
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(ament_cmake_gtest REQUIRED)
+  ament_add_gtest(test_vehicle_interface test/test_vehicle_interface.cpp)
+  target_include_directories(test_vehicle_interface PRIVATE include)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -32,5 +30,10 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
+
+install(TARGETS
+  vehicle_interface_node
+  DESTINATION lib/${PROJECT_NAME}
+)
 
 ament_package()
